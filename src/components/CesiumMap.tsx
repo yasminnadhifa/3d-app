@@ -1,42 +1,58 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import * as Cesium from "cesium";
-import { useCesium } from "../hooks/useCesium";
-import { assetIds } from "../config/cesiumConfig";
+import { accessToken } from "../config/cesiumConfig";
 
-export default function CesiumMap() {
-  const { containerRef, viewer } = useCesium();
+Cesium.Ion.defaultAccessToken = accessToken;
+
+type Site = {
+  lat: number;
+  lng: number;
+  name: string;
+  roads: {
+    name: string;
+    detector: {
+      lat: number;
+      lng: number;
+    };
+  }[];
+};
+
+type Props = {
+  site?: Site; 
+};
+
+export default function CesiumMap({ site }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<Cesium.Viewer | null>(null);
+  const siteRenderedRef = useRef(false);
 
   useEffect(() => {
-    if (!viewer) return;
+    if (!containerRef.current || viewerRef.current) return;
 
-    // Create an async function to handle the initialization
-    const initializeMap = async () => {
-      // Position - Monas Jakarta
-      viewer.camera.flyTo({
-        destination: Cesium. Cartesian3.fromDegrees(106.8129, -6.1751, 400),
-        orientation:  {
-          heading: Cesium.Math.toRadians(0.0),
-          pitch: Cesium.Math.toRadians(-15.0),
-        }
+    const initViewer = async () => {
+      const viewer = new Cesium.Viewer(containerRef.current!, {
+        terrainProvider: await Cesium.createWorldTerrainAsync(),
+        animation: false,
+        timeline: false,
       });
 
-      // Init resource and tile sets 
-      const resources = {
-        car: await Cesium.IonResource.fromAssetId(assetIds. car)
-      };
-      
-
+      viewerRef.current = viewer;
     };
 
-    // Call the async function
-    initializeMap();
+    initViewer();
 
-  }, [viewer]);
+    return () => {
+      viewerRef.current?.destroy();
+      viewerRef.current = null;
+    };
+  }, []);
+
+
 
   return (
     <div
       ref={containerRef}
-      // style={{ width:  "100%", height: "100%" }}
+      style={{ width: "100%", height: "100vh" }}
     />
   );
 }
