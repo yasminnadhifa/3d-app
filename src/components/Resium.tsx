@@ -1,16 +1,21 @@
 import { useMemo, useEffect, useState, useRef } from "react";
 import { Viewer, Entity, Cesium3DTileset, CameraFlyTo } from "resium";
 import * as Cesium from "cesium";
-import { accessToken } from "../config/cesiumConfig";
 import { io, Socket } from "socket.io-client";
+import { accessToken } from "../config/cesiumConfig";
 
 Cesium.Ion.defaultAccessToken = accessToken;
+
+// OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
+
+const carUrl = Cesium.IonResource.fromAssetId(4224101)
 
 type Detector = {
   detector_id: number;
   lat: number;
   lng: number;
+  direction_deg: number;
 };
 
 type Road = {
@@ -19,47 +24,58 @@ type Road = {
   detector: Detector;
 };
 
-
 type Site = {
   lat: number;
   lng: number;
   name: string;
   roads: Road[];
+  site_id: number;
 };
 
 type Props = {
   site: Site;
 };
-function enuToWorld(
+
+type VehicleState = {
+  id: string;
+  position: Cesium.Cartesian3;
+};
+
+function radarRelativeToWorld(
   radarLat: number,
   radarLng: number,
-  x: number,
-  y: number,
-  z = 1
+  xpos: number, // forward (meter)
+  ypos: number, // right (meter)
+  directionDeg: number, // radar heading from north
+  z = 0
 ) {
-  const radarPosition = Cesium.Cartesian3.fromDegrees(radarLng, radarLat, 0);
+  const heading = Cesium.Math.toRadians(directionDeg);
 
-  const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(radarPosition);
+  // radar local → ENU
+  const east = xpos * Math.sin(heading) + ypos * Math.cos(heading);
+
+  const north = xpos * Math.cos(heading) - ypos * Math.sin(heading);
+
+  // ENU → world
+  const origin = Cesium.Cartesian3.fromDegrees(radarLng, radarLat, 0);
+  const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
 
   return Cesium.Matrix4.multiplyByPoint(
     enuTransform,
-    new Cesium.Cartesian3(x, y, z),
+    new Cesium.Cartesian3(east, north, z),
     new Cesium.Cartesian3()
   );
 }
-type VehicleState = {
-  id: string;
-  position: Cesium.SampledPositionProperty;
-};
 
 export default function CesiumMap({ site }: Props) {
   const [terrainProvider, setTerrainProvider] =
     useState<Cesium.TerrainProvider | null>(null);
+
   const [vehicles, setVehicles] = useState<Map<string, VehicleState>>(
     new Map()
   );
-const [cameraInitialized, setCameraInitialized] = useState(false);
 
+  const [cameraInitialized, setCameraInitialized] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -73,96 +89,76 @@ const [cameraInitialized, setCameraInitialized] = useState(false);
     };
   }, []);
 
-
-
-const detectorMap = useMemo(() => {
-  const map = new Map<number, { lat: number; lng: number }>();
-
-  site.roads.forEach((road) => {
-    map.set(road.road_id, {
-      lat: road.detector.lat,
-      lng: road.detector.lng,
-    });
-  });
-
-  return map;
-}, [site]);
-
-
-useEffect(() => {
-  if (!terrainProvider || detectorMap.size === 0) return;
-
-  const socket: Socket = io("ws://192.168.20.200:7172", {
-    path: "/socket.io",
-    transports: ["websocket"],
-  });
-
-  socket.on("connect", () => {
-    console.log("✅ socket connected", socket.id);
-  });
-
-  socket.on("new_radar_data", (raw: string) => {
-    let msg;
-
-    try {
-      msg = JSON.parse(raw);
-    } catch (e) {
-      console.error("Invalid radar payload", raw);
-      return;
-    }
-
-    const radar = detectorMap.get(Number(msg.road_id));
-    if (!radar) return;
-
-    setVehicles((prev) => {
-      const next = new Map(prev);
-
-      msg.data.forEach((obj) => {
-        const vehicleId = `${msg.road_id}-${obj.object_id}`;
-
-        let vehicle = next.get(vehicleId);
-        if (!vehicle) {
-          const position = new Cesium.SampledPositionProperty();
-          position.setInterpolationOptions({
-            interpolationDegree: 1,
-            interpolationAlgorithm: Cesium.LinearApproximation,
-          });
-
-          vehicle = {
-            id: vehicleId,
-            position,
-          };
-          next.set(vehicleId, vehicle);
-        }
-
-        vehicle.position.addSample(
-          Cesium.JulianDate.now(),
-          enuToWorld(
-            radar.lat,
-            radar.lng,
-            obj.xpos,
-            obj.ypos,
-            5
-          )
-        );
+  const detectorMap = useMemo(() => {
+    const map = new Map<number, { lat: number; lng: number; direction_deg: number }>();
+    site.roads.forEach((road) => {
+      map.set(road.road_id, {
+        lat: road.detector.lat,
+        lng: road.detector.lng,
+        direction_deg: road.detector.direction_deg,
       });
-
-      return next;
     });
-  });
+    return map;
+  }, [site]);
 
-  socket.on("disconnect", () => {
-    console.log("❌ socket disconnected");
-  });
+  useEffect(() => {
+    if (!terrainProvider || detectorMap.size === 0) return;
 
-  return () => {
-    socket.disconnect();
-  };
-}, [terrainProvider, detectorMap]);
+    const socket: Socket = io("ws://192.168.20.200:7172", {
+      path: "/socket.io",
+      transports: ["websocket"],
+    });
 
+    socket.on("connect", () => {
+      console.log("socket connected", socket.id);
 
+      site.roads.forEach((road) => {
+        const roomName = `site_${site.site_id}_road_${road.road_id}`;
+        socket.emit("enter_room", roomName);
+      });
+    });
+
+    socket.on("new_radar_data", (raw: string) => {
+      let msg: any;
+      try {
+        msg = JSON.parse(raw);
+      } catch {
+        return;
+      }
+
+      const radar = detectorMap.get(Number(msg.road_id));
+      if (!radar) return;
+
+      setVehicles((prev) => {
+        const next = new Map(prev);
+
+        msg.data.forEach((obj: any) => {
+          const id = `${msg.road_id}-${obj.object_id}`;
+
+          next.set(id, {
+            id,
+            position: radarRelativeToWorld(
+              radar.lat,
+              radar.lng,
+              obj.xpos,
+              obj.ypos,
+              radar.direction_deg,
+              0
+            ),
+          });
+        });
+
+        return next;
+      });
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [terrainProvider, detectorMap, site]);
 
   if (!terrainProvider) return null;
+
   return (
     <Viewer
       full
@@ -179,29 +175,24 @@ useEffect(() => {
       selectionIndicator={false}
       style={{ width: "100%", height: "100vh" }}
     >
-      {/* Camera */}
-
-{!cameraInitialized && (
-  <CameraFlyTo
-    destination={Cesium.Cartesian3.fromDegrees(site.lng, site.lat, 500)}
-    orientation={{
-      pitch: Cesium.Math.toRadians(-45),
-      heading: 0,
-      roll: 0,
-    }}
-    duration={0}
-    onComplete={() => {
-      setCameraInitialized(true);
-    }}
-  />
-)}
-
+      {!cameraInitialized && (
+        <CameraFlyTo
+          destination={Cesium.Cartesian3.fromDegrees(site.lng, site.lat, 500)}
+          orientation={{
+            pitch: Cesium.Math.toRadians(-45),
+            heading: 0,
+            roll: 0,
+          }}
+          duration={0}
+          onComplete={() => setCameraInitialized(true)}
+        />
+      )}
 
       <Cesium3DTileset url={osmBuildingsUrl} />
 
-      {site.roads.map((road, index) => (
+      {site.roads.map((road) => (
         <Entity
-          key={`detector-${index}`}
+          key={road.road_id}
           position={Cesium.Cartesian3.fromDegrees(
             road.detector.lng,
             road.detector.lat
@@ -209,34 +200,32 @@ useEffect(() => {
           point={{
             pixelSize: 10,
             color: Cesium.Color.RED,
-            outlineColor: Cesium.Color.WHITE,
-            outlineWidth: 2,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
             heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
           }}
           label={{
             text: road.name,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
             pixelOffset: new Cesium.Cartesian2(0, -15),
             scale: 0.5,
             fillColor: Cesium.Color.WHITE,
             outlineColor: Cesium.Color.BLACK,
             outlineWidth: 2,
             style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
           }}
         />
       ))}
+
       {Array.from(vehicles.values()).map((v) => (
         <Entity
           key={v.id}
           position={v.position}
-          orientation={new Cesium.VelocityOrientationProperty(v.position)}
           point={{
             pixelSize: 8,
             color: Cesium.Color.BLUE,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
+    heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND
+
           }}
         />
       ))}
