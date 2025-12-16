@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useState, useRef } from "react";
+import { useMemo, useEffect, useState } from "react";
 import { Viewer, Entity, Cesium3DTileset, CameraFlyTo } from "resium";
 import * as Cesium from "cesium";
 import { io, Socket } from "socket.io-client";
@@ -9,7 +9,7 @@ Cesium.Ion.defaultAccessToken = accessToken;
 // OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
 
-const carUrl = Cesium.IonResource.fromAssetId(4224101)
+// const carUrl = Cesium.IonResource.fromAssetId(4224101)
 
 type Detector = {
   detector_id: number;
