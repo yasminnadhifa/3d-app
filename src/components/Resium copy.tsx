@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useState } from "react";
+import { useMemo, useEffect, useState, useRef } from "react";
 import { Viewer, Entity, Cesium3DTileset, CameraFlyTo } from "resium";
 import * as Cesium from "cesium";
 import { io, Socket } from "socket.io-client";
@@ -9,7 +9,7 @@ Cesium.Ion.defaultAccessToken = accessToken;
 // OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
 
-// const carUrl = Cesium.IonResource.fromAssetId(4224101)
+const carUrl = Cesium.IonResource.fromAssetId(4224101)
 
 type Detector = {
   detector_id: number;
@@ -44,27 +44,32 @@ type VehicleState = {
 function radarRelativeToWorld(
   radarLat: number,
   radarLng: number,
-  xpos: number, // forward (meter)
-  ypos: number, // right (meter)
-  directionDeg: number, // radar heading from north
+  xpos: number, // forward dari radar (meter)
+  ypos: number, // right dari radar (meter)
+  directionDeg: number, // heading radar dari north (0=north, 90=east, clockwise)
   z = 0
-) {
+): Cesium.Cartesian3 {
+  // Posisi radar
+  const radarPosition = Cesium.Cartesian3.fromDegrees(radarLng, radarLat, 0);
+  
+  // Transform matrix ENU -> World
+  const enuToWorld = Cesium.Transforms.eastNorthUpToFixedFrame(radarPosition);
+  
+  // Heading dalam radians
   const heading = Cesium.Math.toRadians(directionDeg);
-
-  // radar local → ENU
+  
+  // Konversi dari radar local (forward=x, right=y) ke ENU (east, north)
   const east = xpos * Math.sin(heading) + ypos * Math.cos(heading);
-
   const north = xpos * Math.cos(heading) - ypos * Math.sin(heading);
-
-  // ENU → world
-  const origin = Cesium.Cartesian3.fromDegrees(radarLng, radarLat, 0);
-  const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
-
-  return Cesium.Matrix4.multiplyByPoint(
-    enuTransform,
+  
+  // Apply transform
+  const worldPosition = Cesium.Matrix4.multiplyByPoint(
+    enuToWorld,
     new Cesium.Cartesian3(east, north, z),
     new Cesium.Cartesian3()
   );
+  
+  return worldPosition;
 }
 
 export default function CesiumMap({ site }: Props) {
@@ -179,7 +184,7 @@ export default function CesiumMap({ site }: Props) {
         <CameraFlyTo
           destination={Cesium.Cartesian3.fromDegrees(site.lng, site.lat, 500)}
           orientation={{
-            pitch: Cesium.Math.toRadians(-90),
+            pitch: Cesium.Math.toRadians(-45),
             heading: 0,
             roll: 0,
           }}
@@ -221,7 +226,7 @@ export default function CesiumMap({ site }: Props) {
           key={v.id}
           position={v.position}
           point={{
-            pixelSize: 6,
+            pixelSize: 8,
             color: Cesium.Color.BLUE,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
     heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND
