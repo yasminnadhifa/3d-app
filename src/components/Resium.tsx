@@ -9,8 +9,6 @@ Cesium.Ion.defaultAccessToken = accessToken;
 // OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
 
-// const carUrl = Cesium.IonResource.fromAssetId(4224101)
-
 type Detector = {
   detector_id: number;
   lat: number;
@@ -38,33 +36,40 @@ type Props = {
 
 type VehicleState = {
   id: string;
-  position: Cesium.Cartesian3;
+  position: Cesium.Cartesian3; 
+  lastUpdate: number; 
 };
 
-function radarRelativeToWorld(
-  radarLat: number,
-  radarLng: number,
-  xpos: number, // forward (meter)
-  ypos: number, // right (meter)
-  directionDeg: number, // radar heading from north
-  z = 0
-) {
-  const heading = Cesium.Math.toRadians(directionDeg);
-
-  // radar local → ENU
-  const east = xpos * Math.sin(heading) + ypos * Math.cos(heading);
-
-  const north = xpos * Math.cos(heading) - ypos * Math.sin(heading);
-
-  // ENU → world
-  const origin = Cesium.Cartesian3.fromDegrees(radarLng, radarLat, 0);
-  const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
-
-  return Cesium.Matrix4.multiplyByPoint(
-    enuTransform,
-    new Cesium.Cartesian3(east, north, z),
-    new Cesium.Cartesian3()
-  );
+function radarToWGS84(radarLat: number, radarLon: number, radarDirection: number, xpos: number, ypos: number) {
+  // Konstanta radius bumi (meter)
+  const R = 6371000;
+  
+  // Konversi direction radar ke radian (0° = Utara, searah jarum jam)
+  const dirRad = (radarDirection * Math.PI) / 180;
+  
+  // Rotasi koordinat lokal sesuai direction radar
+  const rotatedX = xpos * Math.cos(dirRad) - ypos * Math.sin(dirRad);
+  const rotatedY = xpos * Math.sin(dirRad) + ypos * Math.cos(dirRad);
+  
+  // Konversi radar lat/lon ke radian
+  const lat1 = (radarLat * Math.PI) / 180;
+  const lon1 = (radarLon * Math.PI) / 180;
+  
+  // Hitung perubahan latitude
+  const dLat = rotatedY / R;
+  
+  // Hitung perubahan longitude (disesuaikan dengan latitude)
+  const dLon = rotatedX / (R * Math.cos(lat1));
+  
+  // Koordinat akhir objek
+  const objLat = lat1 + dLat;
+  const objLon = lon1 + dLon;
+  
+  // Konversi kembali ke derajat
+  return {
+    latitude: (objLat * 180) / Math.PI,
+    longitude: (objLon * 180) / Math.PI
+  };
 }
 
 export default function CesiumMap({ site }: Props) {
@@ -101,6 +106,28 @@ export default function CesiumMap({ site }: Props) {
     return map;
   }, [site]);
 
+  // Auto cleanup vehicles yang tidak update dalam 5 detik
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setVehicles((prev) => {
+        const next = new Map(prev);
+        let hasChanges = false;
+        
+        next.forEach((vehicle, id) => {
+          if (now - vehicle.lastUpdate > 5000) {
+            next.delete(id);
+            hasChanges = true;
+          }
+        });
+        
+        return hasChanges ? next : prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     if (!terrainProvider || detectorMap.size === 0) return;
 
@@ -129,27 +156,53 @@ export default function CesiumMap({ site }: Props) {
       const radar = detectorMap.get(Number(msg.road_id));
       if (!radar) return;
 
+      console.log("Received radar data:", msg.data.length, "objects"); // Debug log
+
       setVehicles((prev) => {
         const next = new Map(prev);
 
         msg.data.forEach((obj: any) => {
           const id = `${msg.road_id}-${obj.object_id}`;
 
+          // Konversi ke WGS84
+          const wgs84 = radarToWGS84(
+            radar.lat,
+            radar.lng,
+            radar.direction_deg,
+            obj.xpos,
+            obj.ypos
+          );
+
+          const position = Cesium.Cartesian3.fromDegrees(
+            wgs84.longitude,
+            wgs84.latitude,
+            0 
+          );
+
+          console.log(`Vehicle ${id}:`, {
+            xpos: obj.xpos,
+            ypos: obj.ypos,
+            lat: wgs84.latitude,
+            lon: wgs84.longitude
+          }); 
+
           next.set(id, {
             id,
-            position: radarRelativeToWorld(
-              radar.lat,
-              radar.lng,
-              obj.xpos,
-              obj.ypos,
-              radar.direction_deg,
-              0
-            ),
+            position,
+            lastUpdate: Date.now()
           });
         });
 
         return next;
       });
+    });
+
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected");
+    });
+
+    socket.on("error", (error) => {
+      console.error("Socket error:", error);
     });
 
     return () => {
@@ -190,6 +243,7 @@ export default function CesiumMap({ site }: Props) {
 
       <Cesium3DTileset url={osmBuildingsUrl} />
 
+      {/* Radar positions */}
       {site.roads.map((road) => (
         <Entity
           key={road.road_id}
@@ -201,7 +255,7 @@ export default function CesiumMap({ site }: Props) {
             pixelSize: 10,
             color: Cesium.Color.RED,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           }}
           label={{
             text: road.name,
@@ -211,21 +265,31 @@ export default function CesiumMap({ site }: Props) {
             outlineColor: Cesium.Color.BLACK,
             outlineWidth: 2,
             style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           }}
         />
       ))}
 
+      {/* Vehicles from radar */}
       {Array.from(vehicles.values()).map((v) => (
         <Entity
           key={v.id}
           position={v.position}
           point={{
-            pixelSize: 6,
-            color: Cesium.Color.BLUE,
+            pixelSize: 8,
+            color: Cesium.Color.YELLOW,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
-    heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND
-
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          }}
+          label={{
+            text: v.id.split("-")[1], 
+            pixelOffset: new Cesium.Cartesian2(0, -12),
+            scale: 0.4,
+            fillColor: Cesium.Color.YELLOW,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 1,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           }}
         />
       ))}
