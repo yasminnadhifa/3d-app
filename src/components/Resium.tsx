@@ -2,12 +2,20 @@ import { useMemo, useEffect, useState } from "react";
 import { Viewer, Entity, Cesium3DTileset, CameraFlyTo } from "resium";
 import * as Cesium from "cesium";
 import { io, Socket } from "socket.io-client";
-import { accessToken } from "../config/cesiumConfig";
+import { accessToken, assetIds } from "../config/cesiumConfig";
 
 Cesium.Ion.defaultAccessToken = accessToken;
 
 // OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
+
+// GANTI DENGAN ASSET ID MODEL ANDA
+const VEHICLE_MODEL_ASSET_ID = assetIds.car;
+const PED_MODEL_ASSET_ID = assetIds.ped;
+
+
+const VEHICLE_HEADING_OFFSET = 180;  
+const PED_HEADING_OFFSET = -90;     
 
 type Detector = {
   detector_id: number;
@@ -36,39 +44,47 @@ type Props = {
 
 type VehicleState = {
   id: string;
-  position: Cesium.Cartesian3; 
-  lastUpdate: number; 
+  position: Cesium.Cartesian3;
+  heading: number;
+  type: number;
+  lastUpdate: number;
 };
 
-function radarToWGS84(radarLat: number, radarLon: number, radarDirection: number, xpos: number, ypos: number) {
+function radarToWGS84(
+  radarLat: number,
+  radarLon: number,
+  radarDirection: number,
+  xpos: number,
+  ypos: number
+) {
   // Konstanta radius bumi (meter)
   const R = 6371000;
-  
+
   // Konversi direction radar ke radian (0° = Utara, searah jarum jam)
   const dirRad = (radarDirection * Math.PI) / 180;
-  
+
   // Rotasi koordinat lokal sesuai direction radar
   const rotatedX = xpos * Math.cos(dirRad) - ypos * Math.sin(dirRad);
   const rotatedY = xpos * Math.sin(dirRad) + ypos * Math.cos(dirRad);
-  
+
   // Konversi radar lat/lon ke radian
   const lat1 = (radarLat * Math.PI) / 180;
   const lon1 = (radarLon * Math.PI) / 180;
-  
+
   // Hitung perubahan latitude
   const dLat = rotatedY / R;
-  
+
   // Hitung perubahan longitude (disesuaikan dengan latitude)
   const dLon = rotatedX / (R * Math.cos(lat1));
-  
+
   // Koordinat akhir objek
   const objLat = lat1 + dLat;
   const objLon = lon1 + dLon;
-  
+
   // Konversi kembali ke derajat
   return {
     latitude: (objLat * 180) / Math.PI,
-    longitude: (objLon * 180) / Math.PI
+    longitude: (objLon * 180) / Math.PI,
   };
 }
 
@@ -76,6 +92,11 @@ export default function CesiumMap({ site }: Props) {
   const [terrainProvider, setTerrainProvider] =
     useState<Cesium.TerrainProvider | null>(null);
 
+  const [vehicleModelUrl, setVehicleModelUrl] = 
+    useState<Cesium.IonResource | null>(null);
+  const [pedModelUrl, setPedModelUrl] = 
+    useState<Cesium.IonResource | null>(null);
+    
   const [vehicles, setVehicles] = useState<Map<string, VehicleState>>(
     new Map()
   );
@@ -85,8 +106,19 @@ export default function CesiumMap({ site }: Props) {
   useEffect(() => {
     let mounted = true;
 
+    // Load terrain
     Cesium.createWorldTerrainAsync().then((provider) => {
       if (mounted) setTerrainProvider(provider);
+    });
+
+    // Load vehicle model
+    Cesium.IonResource.fromAssetId(VEHICLE_MODEL_ASSET_ID).then((resource) => {
+      if (mounted) setVehicleModelUrl(resource);
+    });
+
+    // Load pedestrian model
+    Cesium.IonResource.fromAssetId(PED_MODEL_ASSET_ID).then((resource) => {
+      if (mounted) setPedModelUrl(resource);
     });
 
     return () => {
@@ -94,8 +126,34 @@ export default function CesiumMap({ site }: Props) {
     };
   }, []);
 
+  // Auto cleanup vehicles yang tidak update dalam 3 detik
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setVehicles((prev) => {
+        const next = new Map(prev);
+        let hasChanges = false;
+
+        next.forEach((vehicle, id) => {
+          if (now - vehicle.lastUpdate > 3000) {
+            next.delete(id);
+            hasChanges = true;
+            console.log(`Removed stale vehicle: ${id}`);
+          }
+        });
+
+        return hasChanges ? next : prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   const detectorMap = useMemo(() => {
-    const map = new Map<number, { lat: number; lng: number; direction_deg: number }>();
+    const map = new Map<
+      number,
+      { lat: number; lng: number; direction_deg: number }
+    >();
     site.roads.forEach((road) => {
       map.set(road.road_id, {
         lat: road.detector.lat,
@@ -106,30 +164,8 @@ export default function CesiumMap({ site }: Props) {
     return map;
   }, [site]);
 
-  // Auto cleanup vehicles yang tidak update dalam 5 detik
   useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setVehicles((prev) => {
-        const next = new Map(prev);
-        let hasChanges = false;
-        
-        next.forEach((vehicle, id) => {
-          if (now - vehicle.lastUpdate > 5000) {
-            next.delete(id);
-            hasChanges = true;
-          }
-        });
-        
-        return hasChanges ? next : prev;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    if (!terrainProvider || detectorMap.size === 0) return;
+    if (!terrainProvider || !vehicleModelUrl || !pedModelUrl || detectorMap.size === 0) return;
 
     const socket: Socket = io("ws://192.168.20.200:7172", {
       path: "/socket.io",
@@ -156,12 +192,13 @@ export default function CesiumMap({ site }: Props) {
       const radar = detectorMap.get(Number(msg.road_id));
       if (!radar) return;
 
-      console.log("Received radar data:", msg.data.length, "objects"); // Debug log
+      console.log("Received radar data:", msg.data.length, "objects");
 
       setVehicles((prev) => {
         const next = new Map(prev);
 
         msg.data.forEach((obj: any) => {
+          // PERBAIKAN: Gunakan kombinasi road_id dan object_id sebagai unique ID
           const id = `${msg.road_id}-${obj.object_id}`;
 
           // Konversi ke WGS84
@@ -176,19 +213,26 @@ export default function CesiumMap({ site }: Props) {
           const position = Cesium.Cartesian3.fromDegrees(
             wgs84.longitude,
             wgs84.latitude,
-            0 
+            0
           );
+
+          // heading absolut (direction radar + heading objek)
+          const absoluteHeading = (radar.direction_deg + (obj.heading || 0)) % 360;
 
           console.log(`Vehicle ${id}:`, {
             xpos: obj.xpos,
             ypos: obj.ypos,
             lat: wgs84.latitude,
-            lon: wgs84.longitude
-          }); 
+            lon: wgs84.longitude,
+            heading: absoluteHeading,
+            type: obj.object_type
+          });
 
           next.set(id, {
             id,
             position,
+            heading: absoluteHeading,
+            type: obj.object_type,
             lastUpdate: Date.now()
           });
         });
@@ -208,9 +252,9 @@ export default function CesiumMap({ site }: Props) {
     return () => {
       socket.disconnect();
     };
-  }, [terrainProvider, detectorMap, site]);
+  }, [terrainProvider, vehicleModelUrl, pedModelUrl, detectorMap, site]);
 
-  if (!terrainProvider) return null;
+  if (!terrainProvider || !vehicleModelUrl || !pedModelUrl) return null;
 
   return (
     <Viewer
@@ -270,29 +314,43 @@ export default function CesiumMap({ site }: Props) {
         />
       ))}
 
-      {/* Vehicles from radar */}
-      {Array.from(vehicles.values()).map((v) => (
-        <Entity
-          key={v.id}
-          position={v.position}
-          point={{
-            pixelSize: 8,
-            color: Cesium.Color.YELLOW,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-          }}
-          label={{
-            text: v.id.split("-")[1], 
-            pixelOffset: new Cesium.Cartesian2(0, -12),
-            scale: 0.4,
-            fillColor: Cesium.Color.YELLOW,
-            outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 1,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-          }}
-        />
-      ))}
+      {Array.from(vehicles.values()).map((v) => {
+        const headingOffset = v.type === 8 ? PED_HEADING_OFFSET : VEHICLE_HEADING_OFFSET;
+        const correctedHeading = (v.heading + headingOffset) % 360;
+        
+        return (
+          <Entity
+            key={v.id}
+            position={v.position}
+            orientation={Cesium.Transforms.headingPitchRollQuaternion(
+              v.position,
+              new Cesium.HeadingPitchRoll(
+                Cesium.Math.toRadians(correctedHeading),
+                0,
+                0
+              )
+            )}
+            model={{
+              uri: v.type === 8 ? pedModelUrl : vehicleModelUrl,
+              minimumPixelSize: 64,
+              maximumScale: 20000,
+              scale: v.type === 8 ? 1.5 : 0.5,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            }}
+            label={{
+              text: `${v.type}`,
+              pixelOffset: new Cesium.Cartesian2(0, -30),
+              scale: 0.5,
+              fillColor: Cesium.Color.WHITE,
+              outlineColor: Cesium.Color.BLACK,
+              outlineWidth: 2,
+              style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              show: true,
+            }}
+          />
+        );
+      })}
     </Viewer>
   );
 }
