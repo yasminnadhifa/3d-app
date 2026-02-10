@@ -2,16 +2,15 @@ import { useMemo, useEffect, useState } from "react";
 import { Viewer, Entity, Cesium3DTileset, CameraFlyTo } from "resium";
 import * as Cesium from "cesium";
 import { io, Socket } from "socket.io-client";
-import { accessToken, assetIds } from "../config/cesiumConfig";
+import { accessToken } from "../config/cesiumConfig";
 
 Cesium.Ion.defaultAccessToken = accessToken;
 
 // OSM Buildings
 const osmBuildingsUrl = Cesium.IonResource.fromAssetId(96188);
 
-// GANTI DENGAN ASSET ID MODEL ANDA
-const VEHICLE_MODEL_ASSET_ID = assetIds.car;
-const PED_MODEL_ASSET_ID = assetIds.ped;
+// const VEHICLE_MODEL_ASSET_ID = assetIds.car;
+// const PED_MODEL_ASSET_ID = assetIds.ped;
 
 
 const VEHICLE_HEADING_OFFSET = 180;  
@@ -81,7 +80,7 @@ function radarToWGS84(
   const objLat = lat1 + dLat;
   const objLon = lon1 + dLon;
 
-  // Konversi kembali ke derajat
+  // Konversi ke derajat
   return {
     latitude: (objLat * 180) / Math.PI,
     longitude: (objLon * 180) / Math.PI,
@@ -92,10 +91,13 @@ export default function CesiumMap({ site }: Props) {
   const [terrainProvider, setTerrainProvider] =
     useState<Cesium.TerrainProvider | null>(null);
 
-  const [vehicleModelUrl, setVehicleModelUrl] = 
-    useState<Cesium.IonResource | null>(null);
-  const [pedModelUrl, setPedModelUrl] = 
-    useState<Cesium.IonResource | null>(null);
+  // const [vehicleModelUrl, setVehicleModelUrl] = 
+  //   useState<string | null>(null);
+  // const [pedModelUrl, setPedModelUrl] = 
+  //   useState<string | null>(null);
+  const [vehicleModelUrl] = useState("/models/car.glb");
+  const [pedModelUrl] = useState("/models/ped.glb");
+
     
   const [vehicles, setVehicles] = useState<Map<string, VehicleState>>(
     new Map()
@@ -111,22 +113,23 @@ export default function CesiumMap({ site }: Props) {
       if (mounted) setTerrainProvider(provider);
     });
 
-    // Load vehicle model
-    Cesium.IonResource.fromAssetId(VEHICLE_MODEL_ASSET_ID).then((resource) => {
-      if (mounted) setVehicleModelUrl(resource);
-    });
+    // // Load vehicle model
+    // Cesium.IonResource.fromAssetId(VEHICLE_MODEL_ASSET_ID).then((resource) => {
+    //   if (mounted) setVehicleModelUrl(resource);
+    // });
 
-    // Load pedestrian model
-    Cesium.IonResource.fromAssetId(PED_MODEL_ASSET_ID).then((resource) => {
-      if (mounted) setPedModelUrl(resource);
-    });
+    // // Load pedestrian model
+    // Cesium.IonResource.fromAssetId(PED_MODEL_ASSET_ID).then((resource) => {
+    //   if (mounted) setPedModelUrl(resource);
+    // });
+
 
     return () => {
       mounted = false;
     };
   }, []);
 
-  // Auto cleanup vehicles yang tidak update dalam 3 detik
+  // Auto cleanup vehicles
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
@@ -198,10 +201,8 @@ export default function CesiumMap({ site }: Props) {
         const next = new Map(prev);
 
         msg.data.forEach((obj: any) => {
-          // PERBAIKAN: Gunakan kombinasi road_id dan object_id sebagai unique ID
           const id = `${msg.road_id}-${obj.object_id}`;
 
-          // Konversi ke WGS84
           const wgs84 = radarToWGS84(
             radar.lat,
             radar.lng,

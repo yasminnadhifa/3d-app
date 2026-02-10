@@ -106,7 +106,7 @@ export default function CesiumMap({ site }: Props) {
     return map;
   }, [site]);
 
-  // Auto cleanup vehicles yang tidak update dalam 5 detik
+  // Auto cleanup vehicles not updated recently
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
